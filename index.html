@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>ジッパーアップ</title>
+<style>
+  :root {
+    --bg: #f3efe8;
+    --ink: #2b2723;
+    --muted: #7b736a;
+    --accent: #e0563b;
+    --card: #fffdf9;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--ink);
+    font-family: "Hiragino Maru Gothic ProN", "M PLUS Rounded 1c", system-ui, sans-serif;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+    overscroll-behavior: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; }
+  .overlay {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    padding: 16px; background: rgba(243, 239, 232, .82); backdrop-filter: blur(3px);
+  }
+  .overlay[hidden] { display: none; }
+  .card {
+    background: var(--card); border-radius: 22px; padding: 28px 24px; width: min(360px, 100%);
+    text-align: center; box-shadow: 0 10px 40px rgba(60, 40, 20, .18);
+  }
+  h1 { margin: 0 0 6px; font-size: 30px; letter-spacing: .04em; }
+  .sub { color: var(--muted); font-size: 14px; line-height: 1.7; margin: 0 0 20px; }
+  .big { font-size: 46px; font-weight: 800; margin: 4px 0; font-variant-numeric: tabular-nums; }
+  .rank { font-size: 64px; font-weight: 900; color: var(--accent); line-height: 1; margin: 6px 0 2px; }
+  .stats { color: var(--muted); font-size: 14px; line-height: 1.8; margin-bottom: 18px; }
+  .stats b { color: var(--ink); }
+  button {
+    font: inherit; font-size: 18px; font-weight: 700; border: 0; border-radius: 999px;
+    padding: 14px 34px; background: var(--accent); color: #fff; cursor: pointer;
+    box-shadow: 0 4px 0 #a83a24;
+  }
+  button:active { transform: translateY(3px); box-shadow: 0 1px 0 #a83a24; }
+  .rules { text-align: left; font-size: 14px; line-height: 1.75; margin: 0 0 22px; padding-left: 1.2em; }
+  .new { color: var(--accent); font-weight: 800; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div class="overlay" id="title">
+  <div class="card">
+    <h1>ジッパーアップ</h1>
+    <p class="sub">パーカーのファスナーを、ただ閉めるだけ。</p>
+    <ul class="rules">
+      <li>下の<b>スライダー</b>をつまんで、<b>まっすぐ上へ</b>スライド</li>
+      <li>横にズレると<b>ガチッと引っかかって</b>タイムロス</li>
+      <li><b>シワ</b>のところは特にズレに厳しい</li>
+      <li>首元まで閉めたらクリア</li>
+    </ul>
+    <button id="startBtn">はじめる</button>
+  </div>
+</div>
+
+<div class="overlay" id="result" hidden>
+  <div class="card">
+    <div class="sub" style="margin:0">CLEAR</div>
+    <div class="rank" id="rRank">A</div>
+    <div class="big" id="rTime">0.00秒</div>
+    <div class="stats" id="rStats"></div>
+    <button id="againBtn">もう一着</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  let W = 0, H = 0, DPR = 1;
+
+  // ---------- layout ----------
+  const L = {};
+  function layout() {
+    DPR = Math.min(window.devicePixelRatio || 1, 3);
+    W = window.innerWidth; H = window.innerHeight;
+    cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    L.cx = W / 2;
+    L.bodyW = Math.min(W * 0.78, 380);
+    L.yTop = Math.max(H * 0.26, 150);        // neckline (zipper end)
+    L.yBot = H * 0.86;                       // hem (zipper start)
+    L.len = L.yBot - L.yTop;
+    L.maxGap = L.bodyW * 0.34;
+    L.tooth = Math.max(5, Math.min(7, L.len / 80));
+    L.tol = Math.max(16, L.bodyW * 0.07);    // allowed sideways drift
+  }
+
+  // ---------- game state ----------
+  const PALETTES = [
+    { body: '#3d5a80', dark: '#2c4463', shirt: '#f2e9dc' },
+    { body: '#c8553d', dark: '#9c3e2b', shirt: '#2d2a32' },
+    { body: '#5b8e7d', dark: '#436b5d', shirt: '#f4f1de' },
+    { body: '#8e8d8a', dark: '#6b6a67', shirt: '#e85d75' },
+    { body: '#2b2d42', dark: '#1b1c2b', shirt: '#edf2f4' },
+    { body: '#e9c46a', dark: '#c9a447', shirt: '#264653' },
+  ];
+  const S = {
+    state: 'title',   // title | ready | play | snag | clear
+    p: 0,             // zipper progress 0..1
+    offset: 0,        // slider sideways offset (px)
+    grabbing: false, grab: null,
+    t0: 0, elapsed: 0, lost: 0,
+    snags: 0, snagUntil: 0, snagAt: 0,
+    wrinkles: [], pal: PALETTES[0],
+    shake: 0, popups: [], lastTooth: 0,
+  };
+
+  function newRound() {
+    S.pal = PALETTES[Math.floor(Math.random() * PALETTES.length)];
+    S.p = 0; S.offset = 0; S.grabbing = false;
+    S.elapsed = 0; S.lost = 0; S.snags = 0;
+    S.popups = []; S.shake = 0; S.lastTooth = 0;
+    // random wrinkles (strict zones)
+    const n = 3;
+    S.wrinkles = [];
+    for (let i = 0; i < n; i++) {
+      const base = 0.14 + i * (0.74 / n);
+      const c = base + Math.random() * (0.74 / n - 0.1);
+      S.wrinkles.push({ c, h: 0.05 + Math.random() * 0.025, seed: Math.random() * 10 });
+    }
+    S.state = 'ready';
+  }
+
+  const sliderY = () => L.yBot - S.p * L.len;
+  function inWrinkle(p) {
+    for (const w of S.wrinkles) if (Math.abs(p - w.c) < w.h) return w;
+    return null;
+  }
+  const tolAt = p => (inWrinkle(p) ? L.tol * 0.5 : L.tol);
+
+  // ---------- audio ----------
+  let AC = null, noiseBuf = null;
+  function audio() {
+    if (!AC) {
+      try {
+        AC = new (window.AudioContext || window.webkitAudioContext)();
+        noiseBuf = AC.createBuffer(1, AC.sampleRate * 0.05, AC.sampleRate);
+        const d = noiseBuf.getChannelData(0);
+        for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+      } catch (e) { AC = null; }
+    }
+    if (AC && AC.state === 'suspended') AC.resume();
+  }
+  function tick() {
+    if (!AC) return;
+    const s = AC.createBufferSource(); s.buffer = noiseBuf;
+    const f = AC.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 3200 + Math.random() * 1500; f.Q.value = 3;
+    const g = AC.createGain(); g.gain.value = 0.12;
+    s.connect(f).connect(g).connect(AC.destination);
+    s.start(); s.stop(AC.currentTime + 0.015);
+  }
+  function clunk() {
+    if (!AC) return;
+    const t = AC.currentTime;
+    const o = AC.createOscillator(); o.type = 'square';
+    o.frequency.setValueAtTime(180, t); o.frequency.exponentialRampToValueAtTime(60, t + 0.18);
+    const g = AC.createGain(); g.gain.setValueAtTime(0.18, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+    o.connect(g).connect(AC.destination); o.start(t); o.stop(t + 0.25);
+    const s = AC.createBufferSource(); s.buffer = noiseBuf;
+    const g2 = AC.createGain(); g2.gain.value = 0.3; s.connect(g2).connect(AC.destination); s.start(t);
+  }
+  function chime() {
+    if (!AC) return;
+    const t = AC.currentTime;
+    [660, 880, 1320].forEach((fr, i) => {
+      const o = AC.createOscillator(); o.type = 'triangle'; o.frequency.value = fr;
+      const g = AC.createGain();
+      g.gain.setValueAtTime(0, t + i * 0.08);
+      g.gain.linearRampToValueAtTime(0.15, t + i * 0.08 + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.08 + 0.4);
+      o.connect(g).connect(AC.destination); o.start(t + i * 0.08); o.stop(t + i * 0.08 + 0.45);
+    });
+  }
+
+  // ---------- input ----------
+  function pos(e) { return { x: e.clientX, y: e.clientY }; }
+
+  cv.addEventListener('pointerdown', e => {
+    audio();
+    if (S.state !== 'ready' && S.state !== 'play') return;
+    const q = pos(e);
+    const sx = L.cx + S.offset, sy = sliderY();
+    // grab area: around slider + its pull tab
+    if (Math.abs(q.x - sx) < 44 && q.y > sy - 34 && q.y < sy + 70) {
+      cv.setPointerCapture(e.pointerId);
+      S.grabbing = true;
+      S.grab = { id: e.pointerId, x0: q.x, dy: q.y - sy, off0: S.offset };
+      if (S.state === 'ready') { S.state = 'play'; S.t0 = performance.now(); }
+    }
+  });
+
+  cv.addEventListener('pointermove', e => {
+    if (!S.grabbing || S.state !== 'play' || e.pointerId !== S.grab.id) return;
+    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    for (const ev of (evs.length ? evs : [e])) {
+      if (S.state !== 'play') break;
+      moveTo(pos(ev));
+    }
+  });
+
+  function release(e) {
+    if (S.grab && e.pointerId === S.grab.id) { S.grabbing = false; S.grab = null; }
+  }
+  cv.addEventListener('pointerup', release);
+  cv.addEventListener('pointercancel', release);
+
+  function moveTo(q) {
+    const prevP = S.p;
+    const y = Math.max(L.yTop, Math.min(L.yBot, q.y - S.grab.dy));
+    const targetP = (L.yBot - y) / L.len;
+    S.offset = S.grab.off0 + (q.x - S.grab.x0);
+
+    // check every step along the way so fast swipes can't skip wrinkles
+    const steps = Math.max(1, Math.ceil(Math.abs(targetP - prevP) * L.len / 3));
+    for (let i = 1; i <= steps; i++) {
+      const p = prevP + (targetP - prevP) * (i / steps);
+      if (Math.abs(S.offset) > tolAt(p) && p > 0.005) {
+        S.p = p; snag(); return;
+      }
+    }
+    S.p = targetP;
+
+    // zipper ticks
+    const toothIdx = Math.floor(S.p * L.len / (L.tooth * 2));
+    if (toothIdx !== S.lastTooth) { tick(); S.lastTooth = toothIdx; }
+
+    if (S.p >= 0.999) clear();
+  }
+
+  function snag() {
+    const now = performance.now();
+    S.state = 'snag'; S.snags++;
+    S.snagAt = now; S.snagUntil = now + 1100;
+    S.lost += 1.1;
+    S.grabbing = false; S.grab = null;
+    S.shake = 1;
+    S.p = Math.max(0, S.p - 0.012);
+    const sy = sliderY();
+    S.popups.push({ x: L.cx + S.offset, y: sy - 30, text: 'ガチッ!', t: now, big: true });
+    if (navigator.vibrate) navigator.vibrate([40, 30, 60]);
+    clunk();
+  }
+
+  function clear() {
+    S.p = 1; S.state = 'clear'; S.grabbing = false; S.grab = null;
+    S.elapsed = (performance.now() - S.t0) / 1000;
+    chime();
+    if (navigator.vibrate) navigator.vibrate(30);
+    setTimeout(showResult, 700);
+  }
+
+  // ---------- result ----------
+  function bestGet() { try { return parseFloat(localStorage.getItem('zipup-best')) || null; } catch (e) { return null; } }
+  function bestSet(v) { try { localStorage.setItem('zipup-best', String(v)); } catch (e) {} }
+
+  function showResult() {
+    const t = S.elapsed;
+    let rank = 'C';
+    if (t < 1.6 && S.snags === 0) rank = 'S';
+    else if (t < 3) rank = 'A';
+    else if (t < 5.5) rank = 'B';
+    const prev = bestGet();
+    const isNew = prev === null || t < prev;
+    if (isNew) bestSet(t);
+    document.getElementById('rRank').textContent = rank;
+    document.getElementById('rTime').textContent = t.toFixed(2) + '秒';
+    document.getElementById('rStats').innerHTML =
+      `引っかかり <b>${S.snags}回</b>（ロス約 <b>${S.lost.toFixed(1)}秒</b>）<br>` +
+      (isNew ? '<span class="new">自己ベスト更新！</span>' : `自己ベスト <b>${prev.toFixed(2)}秒</b>`);
+    document.getElementById('result').hidden = false;
+  }
+
+  document.getElementById('startBtn').onclick = () => {
+    audio(); document.getElementById('title').hidden = true; newRound();
+  };
+  document.getElementById('againBtn').onclick = () => {
+    audio(); document.getElementById('result').hidden = true; newRound();
+  };
+
+  // ---------- drawing ----------
+  function gapAt(y) {
+    const sy = sliderY();
+    if (y >= sy) return 0;
+    const span = Math.max(1, sy - L.yTop);
+    const k = Math.min(1, (sy - y) / Math.max(span, L.len * 0.35));
+    const open = (1 - S.p * 0.85); // a nearly closed zipper doesn't flap as wide
+    return L.maxGap * Math.pow(k, 0.85) * open;
+  }
+
+  function rr(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+
+  function draw(now) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#f3efe8'; ctx.fillRect(0, 0, W, H);
+
+    const { cx, bodyW, yTop, yBot } = L;
+    const pal = S.pal;
+    const half = bodyW / 2;
+    const shoulderY = yTop + 6;
+
+    // shake
+    let sh = 0;
+    if (S.shake > 0) { sh = Math.sin(now / 18) * 7 * S.shake; S.shake = Math.max(0, S.shake - 0.035); }
+    ctx.save(); ctx.translate(sh, 0);
+
+    // shadow
+    ctx.fillStyle = 'rgba(60,40,20,.10)';
+    ctx.beginPath(); ctx.ellipse(cx, yBot + 22, half * 1.1, 14, 0, 0, Math.PI * 2); ctx.fill();
+
+    // sleeves
+    ctx.fillStyle = pal.dark;
+    for (const s of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(cx + s * (half - 4), shoulderY + 4);
+      ctx.quadraticCurveTo(cx + s * (half + 40), shoulderY + 10, cx + s * (half + 52), yBot - 30);
+      ctx.lineTo(cx + s * (half + 18), yBot - 22);
+      ctx.lineTo(cx + s * (half - 4), shoulderY + 70);
+      ctx.closePath(); ctx.fill();
+      // cuff
+      ctx.fillStyle = shade(pal.dark, -18);
+      ctx.beginPath();
+      ctx.moveTo(cx + s * (half + 52), yBot - 30);
+      ctx.lineTo(cx + s * (half + 18), yBot - 22);
+      ctx.lineTo(cx + s * (half + 17), yBot - 6);
+      ctx.lineTo(cx + s * (half + 53), yBot - 13);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = pal.dark;
+    }
+
+    // hood (back part)
+    const hoodW = bodyW * 0.62;
+    ctx.fillStyle = pal.dark;
+    ctx.beginPath();
+    ctx.moveTo(cx - hoodW / 2, shoulderY + 4);
+    ctx.bezierCurveTo(cx - hoodW * 0.62, yTop - hoodW * 0.75, cx + hoodW * 0.62, yTop - hoodW * 0.75, cx + hoodW / 2, shoulderY + 4);
+    ctx.closePath(); ctx.fill();
+    // hood opening
+    ctx.fillStyle = shade(pal.dark, -30);
+    ctx.beginPath();
+    ctx.moveTo(cx - hoodW * 0.36, shoulderY);
+    ctx.bezierCurveTo(cx - hoodW * 0.44, yTop - hoodW * 0.55, cx + hoodW * 0.44, yTop - hoodW * 0.55, cx + hoodW * 0.36, shoulderY);
+    ctx.closePath(); ctx.fill();
+
+    // shirt underneath
+    ctx.fillStyle = pal.shirt;
+    ctx.fillRect(cx - L.maxGap / 2 - 4, yTop - 6, L.maxGap + 8, yBot - yTop);
+    // shirt collar
+    ctx.strokeStyle = shade(pal.shirt, -25); ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(cx, yTop - 6, L.maxGap * 0.22, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+
+    // body panels
+    const samples = 48;
+    for (const s of [-1, 1]) {
+      ctx.fillStyle = pal.body;
+      ctx.beginPath();
+      ctx.moveTo(cx + s * half, shoulderY + 10);
+      ctx.lineTo(cx + s * (half + 2), yBot - 10);
+      ctx.lineTo(cx + s * (half - 4), yBot);
+      for (let i = 0; i <= samples; i++) {
+        const y = yBot - (i / samples) * (yBot - yTop);
+        ctx.lineTo(cx + s * gapAt(y) / 2, y);
+      }
+      ctx.lineTo(cx + s * (gapAt(yTop) / 2 + hoodW * 0.12), yTop - 8);
+      ctx.quadraticCurveTo(cx + s * hoodW * 0.5, shoulderY - 6, cx + s * half, shoulderY + 10);
+      ctx.closePath(); ctx.fill();
+
+      // hem rib
+      ctx.fillStyle = pal.dark;
+      ctx.beginPath();
+      ctx.moveTo(cx + s * (half + 2), yBot - 22);
+      ctx.lineTo(cx + s * gapAt(yBot - 22) / 2, yBot - 22);
+      ctx.lineTo(cx, yBot);
+      ctx.lineTo(cx + s * (half - 4), yBot);
+      ctx.closePath(); ctx.fill();
+    }
+
+    // kangaroo pocket halves
+    const pkTop = yBot - L.len * 0.36, pkBot = yBot - 26;
+    for (const s of [-1, 1]) {
+      ctx.fillStyle = shade(pal.body, -8);
+      ctx.beginPath();
+      const gTop = gapAt(pkTop) / 2, gBot = gapAt(pkBot) / 2;
+      ctx.moveTo(cx + s * (gTop + 6), pkTop);
+      ctx.lineTo(cx + s * (half * 0.55 + gTop * 0.3), pkTop);
+      ctx.lineTo(cx + s * (half * 0.75 + gBot * 0.3), pkBot);
+      ctx.lineTo(cx + s * (gBot + 6), pkBot);
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = shade(pal.body, -22); ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx + s * (half * 0.55 + gTop * 0.3), pkTop);
+      ctx.lineTo(cx + s * (half * 0.75 + gBot * 0.3), pkBot);
+      ctx.stroke();
+    }
+
+    // wrinkles
+    for (const w of S.wrinkles) {
+      const wy = yBot - w.c * L.len;
+      const passed = S.p > w.c + w.h;
+      const active = Math.abs(S.p - w.c) < w.h;
+      // zone highlight on fabric
+      if (!passed) {
+        const zh = w.h * L.len;
+        const zg = ctx.createRadialGradient(cx, wy, 0, cx, wy, half * 0.6);
+        zg.addColorStop(0, active ? 'rgba(224,86,59,.22)' : 'rgba(0,0,0,.07)');
+        zg.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.save(); ctx.fillStyle = zg;
+        ctx.beginPath(); ctx.ellipse(cx, wy, half * 0.6, zh, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+      }
+      ctx.strokeStyle = passed ? 'rgba(0,0,0,.08)' : shade(pal.body, -35);
+      ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+      for (let k = -1; k <= 1; k++) {
+        for (const s of [-1, 1]) {
+          const g = gapAt(wy + k * 7) / 2;
+          ctx.beginPath();
+          const x0 = cx + s * (g + 10), x1 = cx + s * (g + half * 0.45);
+          ctx.moveTo(x0, wy + k * 7);
+          ctx.quadraticCurveTo((x0 + x1) / 2, wy + k * 7 - 6 + Math.sin(w.seed + k) * 4, x1, wy + k * 7 + 3);
+          ctx.stroke();
+        }
+      }
+      if (!passed) {
+        ctx.fillStyle = active ? '#e0563b' : 'rgba(255,255,255,.75)';
+        ctx.font = 'bold 12px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+        ctx.fillText('シワ', cx + half * 0.6, wy);
+      }
+    }
+
+    // zipper tape + teeth
+    const sy = sliderY();
+    const T = L.tooth;
+    const toothCol = '#c9c4bb', toothDark = '#8f8a82';
+    // closed portion (below slider)
+    ctx.fillStyle = shade(pal.dark, -10);
+    ctx.fillRect(cx - 7, sy, 14, yBot - sy);
+    for (let y = yBot - T; y > sy; y -= T) {
+      const alt = (Math.round((yBot - y) / T) % 2) ? 1 : -1;
+      ctx.fillStyle = toothCol; ctx.fillRect(cx - 5 + alt * 1.5, y, 10, T * 0.7);
+      ctx.fillStyle = toothDark; ctx.fillRect(cx - 5 + alt * 1.5, y + T * 0.55, 10, T * 0.15);
+    }
+    // open portion (above slider)
+    for (const s of [-1, 1]) {
+      for (let y = sy - T; y > yTop - 4; y -= T * 2) {
+        const g = gapAt(y) / 2;
+        const ex = cx + s * g;
+        ctx.fillStyle = shade(pal.dark, -10);
+        ctx.fillRect(s > 0 ? ex : ex - 6, y - 1, 6, T * 2 + 1);
+        ctx.fillStyle = toothCol;
+        const ty = y + (s > 0 ? T : 0);
+        ctx.fillRect(s > 0 ? ex - 4 : ex - 1, ty, 5, T * 0.7);
+      }
+    }
+
+    // straight guide line above slider
+    if (S.state === 'ready' || S.state === 'play' || S.state === 'snag') {
+      ctx.save();
+      ctx.setLineDash([4, 8]); ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(255,255,255,.45)';
+      ctx.beginPath(); ctx.moveTo(cx, sy - 30); ctx.lineTo(cx, yTop); ctx.stroke();
+      ctx.restore();
+    }
+
+    // drawstrings
+    for (const s of [-1, 1]) {
+      const g = gapAt(yTop + 4) / 2;
+      const x0 = cx + s * (g + 14);
+      ctx.strokeStyle = '#f7f3ec'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(x0, yTop - 2);
+      ctx.quadraticCurveTo(x0 + s * 4, yTop + L.len * 0.15, x0 + s * 2, yTop + L.len * 0.27); ctx.stroke();
+      ctx.fillStyle = '#d8d2c6';
+      rr(x0 + s * 2 - 4, yTop + L.len * 0.27, 8, 12, 3); ctx.fill();
+    }
+
+    // slider
+    drawSlider(cx + S.offset, sy, now);
+
+    ctx.restore();
+
+    // drift meter
+    drawMeter(now);
+
+    // HUD
+    let t = 0;
+    if (S.state === 'play' || S.state === 'snag') t = (now - S.t0) / 1000;
+    else if (S.state === 'clear') t = S.elapsed;
+    ctx.fillStyle = '#2b2723'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.font = '800 34px system-ui, sans-serif';
+    ctx.fillText(t.toFixed(2), W / 2, Math.max(14, env(14)));
+    ctx.font = '600 13px system-ui, sans-serif'; ctx.fillStyle = '#7b736a';
+    ctx.fillText(`引っかかり ${S.snags}回`, W / 2, Math.max(14, env(14)) + 40);
+
+    if (S.state === 'ready') {
+      const a = 0.55 + 0.45 * Math.sin(now / 250);
+      ctx.fillStyle = `rgba(43,39,35,${a})`;
+      ctx.font = '700 15px system-ui, sans-serif'; ctx.textBaseline = 'middle';
+      ctx.fillText('スライダーをつまんで ↑', W / 2, Math.min(H - 20, yBot + 52));
+    }
+    if (S.state === 'snag') {
+      const rem = Math.max(0, S.snagUntil - now);
+      ctx.fillStyle = '#e0563b'; ctx.font = '700 15px system-ui, sans-serif'; ctx.textBaseline = 'middle';
+      ctx.fillText(rem > 0 ? '引っかかった… 直し中' : 'もう一度つまんで ↑', W / 2, Math.min(H - 20, yBot + 52));
+    }
+    if (S.state === 'play' && !S.grabbing) {
+      ctx.fillStyle = '#7b736a'; ctx.font = '700 15px system-ui, sans-serif'; ctx.textBaseline = 'middle';
+      ctx.fillText('スライダーをつまんで ↑', W / 2, Math.min(H - 20, yBot + 52));
+    }
+
+    // popups
+    S.popups = S.popups.filter(pp => now - pp.t < 900);
+    for (const pp of S.popups) {
+      const k = (now - pp.t) / 900;
+      ctx.globalAlpha = 1 - k;
+      ctx.fillStyle = '#e0563b';
+      ctx.font = `900 ${pp.big ? 30 : 18}px system-ui, sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(pp.text, pp.x, pp.y - k * 30);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function env(v) { return v; }
+
+  function drawSlider(x, y, now) {
+    const snagging = S.state === 'snag';
+    const tol = tolAt(S.p);
+    const danger = Math.min(1, Math.abs(S.offset) / tol);
+    let ang = Math.max(-0.5, Math.min(0.5, S.offset / tol * 0.35));
+    if (snagging) ang += Math.sin(now / 30) * 0.06 * Math.max(0, (S.snagUntil - now) / 1100);
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(ang);
+
+    // grab hint ring
+    if (S.state === 'ready' || (S.state === 'play' && !S.grabbing) || (snagging && now > S.snagUntil)) {
+      const r = 34 + Math.sin(now / 200) * 4;
+      ctx.strokeStyle = 'rgba(224,86,59,.55)'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(0, 18, r, 0, Math.PI * 2); ctx.stroke();
+    }
+
+    // body
+    const metal = snagging ? '#d9634a' : mix('#d7d3cc', '#e0563b', danger * danger);
+    ctx.fillStyle = 'rgba(0,0,0,.2)';
+    rr(-11, -14, 24, 30, 6); ctx.fill();
+    ctx.fillStyle = metal;
+    rr(-12, -16, 24, 30, 6); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.5)';
+    rr(-8, -13, 6, 22, 3); ctx.fill();
+    // pull tab
+    ctx.fillStyle = shade(metal, -20);
+    rr(-4, 6, 8, 8, 2); ctx.fill();
+    ctx.fillStyle = metal;
+    rr(-9, 12, 18, 40, 7); ctx.fill();
+    ctx.fillStyle = shade(metal, -35);
+    rr(-4, 30, 8, 16, 4); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawMeter(now) {
+    if (S.state === 'title') return;
+    const w = Math.min(220, W * 0.6), h = 10;
+    const x = W / 2 - w / 2, y = Math.min(H - 28, L.yBot + 80);
+    if (y > H - 20) return;
+    const tol = tolAt(S.p);
+    const maxOff = L.tol * 1.4;
+    // track
+    ctx.fillStyle = 'rgba(0,0,0,.08)'; rr(x, y, w, h, 5); ctx.fill();
+    // safe zone
+    const sw = (tol / maxOff) * w;
+    ctx.fillStyle = 'rgba(91,142,125,.35)';
+    rr(W / 2 - sw / 2, y, sw, h, 5); ctx.fill();
+    // needle
+    const nx = W / 2 + Math.max(-1, Math.min(1, S.offset / maxOff)) * (w / 2);
+    const danger = Math.abs(S.offset) / tol;
+    ctx.fillStyle = danger > 1 ? '#e0563b' : danger > 0.7 ? '#e9a23b' : '#2b2723';
+    rr(nx - 3, y - 5, 6, h + 10, 3); ctx.fill();
+    ctx.fillStyle = '#7b736a'; ctx.font = '600 11px system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillText('まっすぐ度', W / 2, y + h + 6);
+  }
+
+  // color helpers
+  function hex(c) { const n = parseInt(c.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+  function toHex(a) { return '#' + a.map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join(''); }
+  function shade(c, amt) { return toHex(hex(c).map(v => v + amt)); }
+  function mix(a, b, t) { const A = hex(a), B = hex(b); return toHex(A.map((v, i) => v + (B[i] - v) * t)); }
+
+  // ---------- loop ----------
+  function frame(now) {
+    if (S.state === 'snag' && now >= S.snagUntil) {
+      // straighten the slider back onto the track, then let the player re-grab
+      S.offset *= 0.7;
+      if (Math.abs(S.offset) < 0.5) { S.offset = 0; S.state = 'play'; }
+    }
+    if (S.state === 'snag' && now < S.snagUntil) {
+      S.offset *= 0.97;
+    }
+    draw(now);
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', layout);
+  layout();
+  S.wrinkles = [];
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
