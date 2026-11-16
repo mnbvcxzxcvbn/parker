@@ -468,15 +468,6 @@
       }
     }
 
-    // straight guide line above slider
-    if (S.state === 'ready' || S.state === 'play' || S.state === 'snag') {
-      ctx.save();
-      ctx.setLineDash([4, 8]); ctx.lineWidth = 2;
-      ctx.strokeStyle = 'rgba(255,255,255,.45)';
-      ctx.beginPath(); ctx.moveTo(cx, sy - 30); ctx.lineTo(cx, yTop); ctx.stroke();
-      ctx.restore();
-    }
-
     // drawstrings
     for (const s of [-1, 1]) {
       const g = gapAt(yTop + 4) / 2;
